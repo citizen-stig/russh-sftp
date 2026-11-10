@@ -47,3 +47,7 @@ async-trait = ["dep:async-trait"]
 [[bench]]
 name = "upload_benchmark"
 harness = false
+
+[[bench]]
+name = "request_map"
+harness = false

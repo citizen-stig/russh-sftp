@@ -13,9 +13,8 @@ use bytes::Bytes;
 use tokio::{
     io::{self, AsyncRead, AsyncWrite, AsyncWriteExt},
     select,
-    sync::mpsc,
+    sync::{mpsc, Notify},
 };
-use tokio_util::sync::CancellationToken;
 
 use crate::{error::Error, protocol::Packet, utils::read_packet};
 
@@ -100,7 +99,8 @@ where
     let (tx, mut rx) = mpsc::unbounded_channel::<Bytes>();
     let (mut rd, mut wr) = io::split(stream);
 
-    let rc = CancellationToken::new();
+    // Each half notifies only after leaving its loop, so the stored permit always wakes the other half.
+    let rc = std::sync::Arc::new(Notify::new());
     let wc = rc.clone();
     {
         runtime::spawn(async move {
@@ -116,11 +116,11 @@ where
                             Ok(_) => (),
                         }
                     },
-                    _ = rc.cancelled() => break,
+                    _ = rc.notified() => break,
                 }
             }
 
-            rc.cancel();
+            rc.notify_one();
             debug!("read half of sftp stream ended");
         });
     }
@@ -140,11 +140,11 @@ where
                         break;
                     }
                 },
-                _ = wc.cancelled() => break,
+                _ = wc.notified() => break,
             }
         }
 
-        wc.cancel();
+        wc.notify_one();
         debug!("write half of sftp stream ended");
     });
 

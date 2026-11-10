@@ -28,7 +28,6 @@ thiserror = "2.0.21"
 jiff = { version = "1.0.0", default-features = false, features = ["std", "js"] }
 bytes = "1.12.1"
 log = "0.4.35"
-dashmap = "6.2.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4.80"

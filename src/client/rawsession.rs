@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use dashmap::DashMap as HashMap;
 use std::{
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::{
@@ -32,7 +32,7 @@ use crate::{
 };
 
 pub type SftpResult<T> = Result<T, Error>;
-type SharedRequests = HashMap<Option<u32>, oneshot::Sender<SftpResult<Packet>>>;
+type SharedRequests = std::sync::Mutex<HashMap<Option<u32>, oneshot::Sender<SftpResult<Packet>>>>;
 
 pub(crate) struct Request {
     id: Option<u32>,
@@ -54,7 +54,7 @@ impl Future for Request {
         }
 
         let _ = ready!(self.timeout.as_mut().poll(cx));
-        self.requests.remove(&self.id);
+        self.requests.lock().unwrap().remove(&self.id);
         self.completed = true;
         Poll::Ready(Err(Error::Timeout))
     }
@@ -63,7 +63,7 @@ impl Future for Request {
 impl Drop for Request {
     fn drop(&mut self) {
         if !self.completed {
-            self.requests.remove(&self.id);
+            self.requests.lock().unwrap().remove(&self.id);
         }
     }
 }
@@ -75,7 +75,8 @@ pub(crate) struct SessionInner {
 
 impl SessionInner {
     pub fn reply(&mut self, id: Option<u32>, packet: Packet) -> SftpResult<()> {
-        if let Some((_, sender)) = self.requests.remove(&id) {
+        let sender = self.requests.lock().unwrap().remove(&id);
+        if let Some(sender) = sender {
             let validate = if id.is_some() && self.version.is_none() {
                 Err(Error::UnexpectedPacket)
             } else if id.is_none() && self.version.is_some() {
@@ -106,7 +107,7 @@ impl SessionInner {
 impl Drop for SessionInner {
     fn drop(&mut self) {
         // Wake pending requests when the transport stops.
-        self.requests.clear();
+        self.requests.lock().unwrap().clear();
     }
 }
 
@@ -209,7 +210,7 @@ impl RawSftpSession {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let req_map = Arc::new(HashMap::new());
+        let req_map = Arc::new(SharedRequests::default());
         let inner = SessionInner {
             version: None,
             requests: req_map.clone(),
@@ -262,7 +263,7 @@ impl RawSftpSession {
             timeout: Box::pin(timeout),
             completed: false,
         };
-        self.requests.insert(id, tx);
+        self.requests.lock().unwrap().insert(id, tx);
         self.tx.send(bytes)?;
 
         Ok(request)

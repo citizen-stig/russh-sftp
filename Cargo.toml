@@ -25,7 +25,7 @@ bitflags = { version = "2.13.1", features = ["serde"] }
 async-trait = { version = "0.1.92", optional = true }
 
 thiserror = "2.0.20"
-chrono = "0.4.45"
+chrono = { version = "0.4.45", default-features = false, features = ["now"] }
 bytes = "1.12.1"
 log = "0.4.34"
 dashmap = "6.2.1"
@@ -33,6 +33,8 @@ dashmap = "6.2.1"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4.78"
 gloo-timers = { version = "0.4.0", features = ["futures"] }
+# Utc::now() needs JS Date on wasm32-unknown-unknown; SystemTime::now() panics there.
+chrono = { version = "0.4.45", default-features = false, features = ["wasmbind"] }
 
 [dev-dependencies]
 russh = "0.63.2"

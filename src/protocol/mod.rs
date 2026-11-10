@@ -274,3 +274,273 @@ impl TryFrom<Packet> for Bytes {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use bytes::{BufMut, BytesMut};
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn attrs() -> FileAttributes {
+        FileAttributes {
+            size: Some(1024),
+            uid: Some(1000),
+            gid: Some(100),
+            permissions: Some(0o100644),
+            atime: Some(1_700_000_000),
+            mtime: Some(1_700_000_001),
+            ..Default::default()
+        }
+    }
+
+    fn one_extension() -> HashMap<String, String> {
+        // A single entry keeps the encoding independent of HashMap iteration order.
+        HashMap::from([("fsync@openssh.com".to_owned(), "1".to_owned())])
+    }
+
+    /// Wire type numbers from draft-ietf-secsh-filexfer-02 and the packets to encode with them.
+    fn packets() -> Vec<(u8, Packet)> {
+        let h = || "handle".to_owned();
+        let p = || "/tmp/file".to_owned();
+        vec![
+            (
+                1,
+                Init {
+                    version: 3,
+                    extensions: one_extension(),
+                }
+                .into(),
+            ),
+            (
+                2,
+                Version {
+                    version: 3,
+                    extensions: one_extension(),
+                }
+                .into(),
+            ),
+            (
+                3,
+                Open {
+                    id: 1,
+                    filename: p(),
+                    pflags: OpenFlags::READ | OpenFlags::CREATE,
+                    attrs: attrs(),
+                }
+                .into(),
+            ),
+            (4, Close { id: 2, handle: h() }.into()),
+            (
+                5,
+                Read {
+                    id: 3,
+                    handle: h(),
+                    offset: u64::MAX,
+                    len: 32768,
+                }
+                .into(),
+            ),
+            (
+                6,
+                Write {
+                    id: 4,
+                    handle: h(),
+                    offset: 7,
+                    data: vec![0, 1, 2, 255],
+                }
+                .into(),
+            ),
+            (7, Lstat { id: 5, path: p() }.into()),
+            (8, Fstat { id: 6, handle: h() }.into()),
+            (
+                9,
+                SetStat {
+                    id: 7,
+                    path: p(),
+                    attrs: attrs(),
+                }
+                .into(),
+            ),
+            (
+                10,
+                FSetStat {
+                    id: 8,
+                    handle: h(),
+                    attrs: FileAttributes::empty(),
+                }
+                .into(),
+            ),
+            (11, OpenDir { id: 9, path: p() }.into()),
+            (
+                12,
+                ReadDir {
+                    id: 10,
+                    handle: h(),
+                }
+                .into(),
+            ),
+            (
+                13,
+                Remove {
+                    id: 11,
+                    filename: p(),
+                }
+                .into(),
+            ),
+            (
+                14,
+                MkDir {
+                    id: 12,
+                    path: p(),
+                    attrs: attrs(),
+                }
+                .into(),
+            ),
+            (15, RmDir { id: 13, path: p() }.into()),
+            (16, RealPath { id: 14, path: p() }.into()),
+            (17, Stat { id: 15, path: p() }.into()),
+            (
+                18,
+                Rename {
+                    id: 16,
+                    oldpath: p(),
+                    newpath: "/tmp/new".to_owned(),
+                }
+                .into(),
+            ),
+            (19, ReadLink { id: 17, path: p() }.into()),
+            (
+                20,
+                Symlink {
+                    id: 18,
+                    linkpath: p(),
+                    targetpath: "/tmp/target".to_owned(),
+                }
+                .into(),
+            ),
+            (
+                101,
+                Packet::status(19, StatusCode::OpUnsupported, "nope", "en-US"),
+            ),
+            (
+                102,
+                Handle {
+                    id: 20,
+                    handle: h(),
+                }
+                .into(),
+            ),
+            (
+                103,
+                Data {
+                    id: 21,
+                    data: vec![9; 100],
+                }
+                .into(),
+            ),
+            (
+                104,
+                Name {
+                    id: 22,
+                    files: vec![File::new("a", attrs()), File::dummy("b")],
+                }
+                .into(),
+            ),
+            (
+                105,
+                Attrs {
+                    id: 23,
+                    attrs: attrs(),
+                }
+                .into(),
+            ),
+            (
+                200,
+                Extended {
+                    id: 24,
+                    request: "statvfs@openssh.com".to_owned(),
+                    data: vec![1, 2, 3],
+                }
+                .into(),
+            ),
+            (
+                201,
+                ExtendedReply {
+                    id: 25,
+                    data: vec![4, 5, 6],
+                }
+                .into(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_packet_round_trips() {
+        for (r#type, packet) in packets() {
+            let encoded = Bytes::try_from(packet).unwrap();
+            assert_eq!(
+                u32::from_be_bytes(encoded[..4].try_into().unwrap()) as usize,
+                encoded.len() - 4,
+                "length prefix of type {type}"
+            );
+            assert_eq!(encoded[4], r#type);
+
+            let mut payload = encoded.slice(4..);
+            let decoded = Packet::try_from(&mut payload).unwrap();
+            assert!(!payload.has_remaining(), "type {type} left bytes unread");
+            assert_eq!(Bytes::try_from(decoded).unwrap(), encoded, "type {type}");
+        }
+    }
+
+    #[test]
+    fn name_matches_spec_layout() {
+        let mut wire = BytesMut::new();
+        wire.put_u8(104);
+        wire.put_u32(7); // id
+        wire.put_u32(1); // count
+        wire.put_u32(3);
+        wire.put_slice(b"a.c"); // filename
+        wire.put_u32(2);
+        wire.put_slice(b"ln"); // longname
+        wire.put_u32(0x1 | 0x4); // SIZE | PERMISSIONS
+        wire.put_u64(42);
+        wire.put_u32(0o100600);
+
+        let Packet::Name(name) = Packet::try_from(&mut wire.clone().freeze()).unwrap() else {
+            panic!("expected NAME");
+        };
+        assert_eq!(name.id, 7);
+        let [file] = &name.files[..] else {
+            panic!("expected one entry");
+        };
+        assert_eq!(
+            (file.filename.as_str(), file.longname.as_str()),
+            ("a.c", "ln")
+        );
+        assert_eq!(file.attrs.size, Some(42));
+        assert_eq!(file.attrs.permissions, Some(0o100600));
+        assert_eq!((file.attrs.uid, file.attrs.gid), (None, None));
+        assert_eq!((file.attrs.atime, file.attrs.mtime), (None, None));
+
+        let encoded = Bytes::try_from(Packet::Name(name)).unwrap();
+        assert_eq!(encoded[4..], wire[..]);
+    }
+
+    #[test]
+    fn rejects_unknown_type_and_truncated_payload() {
+        assert!(Packet::try_from(&mut Bytes::from_static(&[99, 0, 0, 0, 1])).is_err());
+
+        let full = Bytes::try_from(Packet::from(Close {
+            id: 1,
+            handle: "handle".to_owned(),
+        }))
+        .unwrap();
+        for end in 5..full.len() {
+            assert!(
+                Packet::try_from(&mut full.slice(4..end)).is_err(),
+                "accepted {end} bytes"
+            );
+        }
+    }
+}

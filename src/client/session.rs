@@ -195,7 +195,10 @@ impl SftpSession {
                         .collect();
                 }
                 Err(Error::Status(status)) if status.status_code == StatusCode::Eof => break,
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let _ = self.session.close(handle).await;
+                    return Err(err);
+                }
             }
         }
 
